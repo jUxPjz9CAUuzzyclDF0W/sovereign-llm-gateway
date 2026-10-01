@@ -1,0 +1,24 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      SOVGATE_POLICY: /app/config/policy.yaml
+      SOVGATE_AUDIT_PATH: /app/audit/audit.jsonl
+    volumes:
+      - ./config:/app/config:ro
+      - audit:/app/audit
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    # first run: docker compose exec ollama ollama pull llama3.1:8b
+
+volumes:
+  audit:
+  ollama:

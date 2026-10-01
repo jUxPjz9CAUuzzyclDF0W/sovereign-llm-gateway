@@ -1,0 +1,41 @@
+# Gateway policy: what is sensitive, and what happens to it.
+#
+# Sensitivity levels: public < confidential < restricted
+# Actions:  passthrough | pseudonymise | local | block
+
+upstreams:
+  external:                      # third-party provider (OpenAI-compatible API)
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+    api_key_env: EXTERNAL_API_KEY
+  local:                         # self-hosted model, data never leaves the perimeter
+    base_url: http://ollama:11434/v1
+    model: llama3.1:8b
+
+entities:
+  AHV_NUMBER: restricted         # Swiss social security number
+  IBAN: restricted
+  CREDIT_CARD: restricted
+  EMAIL: confidential
+  PHONE_CH: confidential
+  PERSON: confidential
+  ORG: confidential
+  LOCATION: public
+  CLIENT: confidential           # from the dictionary below
+
+default_entity_sensitivity: confidential
+
+actions:
+  public: passthrough
+  confidential: pseudonymise
+  restricted: local
+
+injection:
+  enabled: true
+  on_detect: local               # suspected injection never reaches the external provider
+
+# Known sensitive terms (exact match, case-insensitive)
+dictionary:
+  CLIENT:
+    - Muster Holding AG
+    - Projekt Matterhorn
