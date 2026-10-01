@@ -38,6 +38,10 @@ class InMemoryVault:
         with self._lock:
             self._session(session_id).mapping.setdefault(token, original)
 
+    def get(self, session_id: str, token: str) -> str | None:
+        with self._lock:
+            return self._session(session_id).mapping.get(token)
+
     def items(self, session_id: str) -> dict[str, str]:
         with self._lock:
             return dict(self._session(session_id).mapping)

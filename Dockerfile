@@ -3,9 +3,16 @@ FROM python:3.11-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
+# EXTRAS=ner adds GLiNER/Presidio with CPU torch (much larger image): docker build --build-arg EXTRAS=ner .
+ARG EXTRAS=""
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+RUN if [ "$EXTRAS" = "ner" ]; then \
+      pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+      pip install --no-cache-dir ".[ner]"; \
+    else \
+      pip install --no-cache-dir .; \
+    fi
 
 COPY config ./config
 

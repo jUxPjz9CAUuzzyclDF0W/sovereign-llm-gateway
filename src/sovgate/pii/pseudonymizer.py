@@ -16,9 +16,10 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .detectors import Detector, Span, resolve_overlaps
+from .propagation import propagate
 from .vault import InMemoryVault
 
-TOKEN_RE = re.compile(r"<([A-Z_]+)_([0-9a-f]{6,12})>")
+TOKEN_RE = re.compile(r"<([A-Z_]+)_([0-9a-f]{4,12})>")
 
 
 @dataclass
@@ -50,37 +51,74 @@ class Pseudonymizer:
     ) -> None:
         if len(secret) < 16:
             raise ValueError("HMAC secret must be at least 16 bytes")
+        if not 4 <= token_length <= 12:
+            raise ValueError("token_length must be between 4 and 12")
         self.detectors = detectors
         self._secret = secret
         self.vault = vault or InMemoryVault()
         self.token_length = token_length
+        self._scope_keys: dict[str, bytes] = {}
 
     # ------------------------------------------------------------- forward
 
-    def detect(self, text: str) -> list[Span]:
+    def detect(self, text: str, propagate_names: bool = True) -> list[Span]:
         spans: list[Span] = []
         for d in self.detectors:
             spans.extend(d.detect(text))
-        return resolve_overlaps(spans)
+        spans = resolve_overlaps(spans)
+        if propagate_names:
+            spans = resolve_overlaps(spans + propagate(text, spans))
+        return spans
 
-    def token_for(self, entity_type: str, value: str) -> str:
+    def _key(self, scope_key: str) -> bytes:
+        """Derive one HMAC key per pseudonym scope (tenant, session...)."""
+        key = self._scope_keys.get(scope_key)
+        if key is None:
+            key = hmac.new(self._secret, f"scope:{scope_key}".encode(), hashlib.sha256).digest()
+            if len(self._scope_keys) > 10_000:  # bounded cache (session scope creates many keys)
+                self._scope_keys.clear()
+            self._scope_keys[scope_key] = key
+        return key
+
+    def token_for(self, entity_type: str, value: str, scope_key: str = "", length: int | None = None) -> str:
         digest = hmac.new(
-            self._secret, f"{entity_type}:{_normalise(entity_type, value)}".encode(), hashlib.sha256
+            self._key(scope_key), f"{entity_type}:{_normalise(entity_type, value)}".encode(), hashlib.sha256
         ).hexdigest()
-        return f"<{entity_type}_{digest[: self.token_length]}>"
+        return f"<{entity_type}_{digest[: length or self.token_length]}>"
 
-    def pseudonymise(self, text: str, session_id: str) -> PseudonymisationResult:
-        spans = self.detect(text)
+    def pseudonymise(
+        self,
+        text: str,
+        session_id: str,
+        scope_key: str = "",
+        spans: list[Span] | None = None,
+    ) -> PseudonymisationResult:
+        """Replace detected entities by tokens.
+
+        `spans` can be passed when detection already ran (avoids running slow
+        NER models twice on the same text).
+        """
+        spans = self.detect(text) if spans is None else spans
         out: list[str] = []
         cursor = 0
         for s in spans:
-            token = self.token_for(s.entity_type, s.text)
-            self.vault.put(session_id, token, s.text)
+            token = self._unique_token(s, session_id, scope_key)
             out.append(text[cursor : s.start])
             out.append(token)
             cursor = s.end
         out.append(text[cursor:])
         return PseudonymisationResult("".join(out), spans)
+
+    def _unique_token(self, span: Span, session_id: str, scope_key: str) -> str:
+        """Lengthen the token on the (rare) collision with a different value."""
+        norm = _normalise(span.entity_type, span.text)
+        for length in range(self.token_length, 13, 2):
+            token = self.token_for(span.entity_type, span.text, scope_key, length)
+            existing = self.vault.get(session_id, token)
+            if existing is None or _normalise(span.entity_type, existing) == norm:
+                self.vault.put(session_id, token, span.text)
+                return token
+        raise RuntimeError("unresolvable pseudonym collision")
 
     # ------------------------------------------------------------- reverse
 

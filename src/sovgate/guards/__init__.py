@@ -1,3 +1,4 @@
 from .injection import InjectionVerdict, scan
+from .spotlight import Boundary
 
-__all__ = ["InjectionVerdict", "scan"]
+__all__ = ["Boundary", "InjectionVerdict", "scan"]

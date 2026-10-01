@@ -37,9 +37,54 @@ class Upstream(BaseModel):
         return os.getenv(self.api_key_env) if self.api_key_env else None
 
 
+class InjectionAction(str, Enum):
+    FLAG = "flag"  # audit only
+    STRIP_TOOLS = "strip_tools"  # remove tool definitions so a hijacked model cannot act
+    BLOCK = "block"  # refuse the request
+
+
 class InjectionPolicy(BaseModel):
+    """Defence against indirect prompt injection.
+
+    Routing a poisoned document to another model does not neutralise it, so the
+    defence is layered instead: untrusted content is always *spotlighted*
+    (wrapped in per-request random boundaries the model is told never to obey),
+    and a positive detection removes the model's ability to act (tools) or
+    blocks the request.
+    """
+
     enabled: bool = True
-    on_detect: Action = Action.LOCAL
+    spotlight: bool = True
+    on_detect: InjectionAction = InjectionAction.STRIP_TOOLS
+    untrusted_roles: list[str] = Field(default_factory=lambda: ["tool"])
+    untrusted_tags: list[str] = Field(
+        default_factory=lambda: ["document", "context", "retrieved", "search_result"]
+    )
+
+
+class PseudonymScope(str, Enum):
+    """Which population shares the same pseudonym for the same value.
+
+    `global` lets the provider link a person across all customers of the
+    gateway; `tenant` (default) limits linkage to one organisation; `session`
+    prevents linkage across conversations at the cost of cross-session memory.
+    """
+
+    GLOBAL = "global"
+    TENANT = "tenant"
+    SESSION = "session"
+
+
+class FailMode(str, Enum):
+    CLOSED = "closed"  # detector failure -> request refused (default)
+    OPEN = "open"  # detector failure -> request forwarded unprotected, audited
+
+
+class NerConfig(BaseModel):
+    backend: str = "none"  # none | gliner | presidio
+    model: str | None = None
+    threshold: float = 0.5
+    languages: list[str] = Field(default_factory=lambda: ["en", "fr", "de"])
 
 
 class Policy(BaseModel):
@@ -55,6 +100,11 @@ class Policy(BaseModel):
     default_entity_sensitivity: Sensitivity = Sensitivity.CONFIDENTIAL
     injection: InjectionPolicy = Field(default_factory=InjectionPolicy)
     dictionary: dict[str, list[str]] = Field(default_factory=dict)
+    pseudonym_scope: PseudonymScope = PseudonymScope.TENANT
+    # System prompts are written by the application, not by users or documents.
+    pseudonymise_system: bool = False
+    fail_mode: FailMode = FailMode.CLOSED
+    ner: NerConfig = Field(default_factory=NerConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> Policy:

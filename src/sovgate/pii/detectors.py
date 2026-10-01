@@ -3,8 +3,8 @@
 Every detector returns a list of `Span` objects. Detectors are deliberately
 small and composable: the regex detectors below cover structured Swiss and
 European identifiers with checksum validation (to keep false positives low),
-and `NerDetector` is an adapter slot for model-based detection of free-text
-entities such as person or organisation names.
+and model-based detectors in `ner.py` handle free-text entities such as
+person or organisation names.
 """
 
 from __future__ import annotations
@@ -151,43 +151,6 @@ class DictionaryDetector:
             for et, rx in self._compiled
             for m in rx.finditer(text)
         ]
-
-
-class NerDetector:
-    """Adapter for Microsoft Presidio (optional dependency, `pip install .[ner]`).
-
-    Maps Presidio entity names onto the gateway's own taxonomy. Kept behind an
-    adapter so it can be swapped for GLiNER or a fine-tuned multilingual model.
-    """
-
-    name = "ner"
-    MAPPING = {"PERSON": "PERSON", "LOCATION": "LOCATION", "NRP": "NRP", "ORGANIZATION": "ORG"}
-
-    def __init__(self, languages: tuple[str, ...] = ("en",), threshold: float = 0.6) -> None:
-        try:
-            from presidio_analyzer import AnalyzerEngine  # type: ignore
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("NER backend requires `pip install .[ner]`") from exc
-        self._engine = AnalyzerEngine(supported_languages=list(languages))
-        self.languages = languages
-        self.threshold = threshold
-
-    def detect(self, text: str) -> list[Span]:  # pragma: no cover - needs models
-        out: list[Span] = []
-        for lang in self.languages:
-            for r in self._engine.analyze(text, language=lang, entities=list(self.MAPPING)):
-                if r.score >= self.threshold:
-                    out.append(
-                        Span(
-                            r.start,
-                            r.end,
-                            self.MAPPING[r.entity_type],
-                            text[r.start : r.end],
-                            score=r.score,
-                            source="ner",
-                        )
-                    )
-        return out
 
 
 def resolve_overlaps(spans: Iterable[Span]) -> list[Span]:

@@ -1,15 +1,13 @@
-"""OpenAI-compatible gateway.
+"""OpenAI-compatible gateway (FastAPI layer).
 
 Point any OpenAI SDK client (or a LangChain / LlamaIndex RAG) at this service
-by changing `base_url`. Each request goes through:
-
-    detect entities -> scan for injection -> route -> pseudonymise -> forward
-    -> re-identify response -> append audit record
+by changing `base_url`. The security logic lives in `pipeline.Gateway`; this
+module only handles HTTP, upstream calls and audit records.
 """
 
 from __future__ import annotations
 
-import copy
+import re
 import time
 import uuid
 from typing import Any
@@ -21,124 +19,123 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .audit import AuditLog
 from .config import Action, Policy, Settings
-from .guards import scan
-from .pii import DictionaryDetector, Pseudonymizer, RegexDetector, Span
+from .pii import Pseudonymizer
+from .pii.factory import build_detectors
 from .pii.vault import InMemoryVault
-from .router import decide
+from .pipeline import DetectionFailure, Gateway, Prepared
 
-PLACEHOLDER_NOTICE = (
-    "Some values in this conversation were replaced by placeholders such as "
-    "<PERSON_3f9a1c>. Treat each placeholder as an opaque name and reproduce it "
-    "verbatim, including the angle brackets, whenever you refer to it."
-)
+_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
-def _iter_text_parts(message: dict[str, Any]):
-    """Yield (container, key) pairs pointing at every text field of a message."""
-    content = message.get("content")
-    if isinstance(content, str):
-        yield message, "content"
-    elif isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                yield part, "text"
+def _checked_id(value: str | None, default: str, name: str) -> str:
+    if value is None:
+        return default
+    if not _ID_RE.fullmatch(value):
+        raise HTTPException(400, f"invalid {name}")
+    return value
 
 
 def create_app(
     settings: Settings | None = None,
     policy: Policy | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    detectors: list | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     policy = policy or Policy.load(settings.policy_path)
-    if not settings.hmac_secret:
-        raise RuntimeError("SOVGATE_HMAC_SECRET must be set")
+    if len(settings.hmac_secret) < 16:
+        raise RuntimeError("SOVGATE_HMAC_SECRET must be set (min. 16 characters)")
 
     pseudo = Pseudonymizer(
-        detectors=[RegexDetector(), DictionaryDetector(policy.dictionary)],
+        detectors=detectors if detectors is not None else build_detectors(policy),
         secret=settings.hmac_secret.encode(),
         vault=InMemoryVault(settings.vault_ttl_seconds),
     )
+    gateway = Gateway(policy, pseudo)
     audit = AuditLog(settings.audit_path)
     client = httpx.AsyncClient(transport=transport, timeout=120)
 
     app = FastAPI(title="Sovereign LLM Gateway", version=__version__)
-    app.state.pseudonymizer = pseudo
+    app.state.gateway = gateway
     app.state.audit = audit
 
-    def analyse(messages: list[dict[str, Any]]):
-        spans: list[Span] = []
-        joined: list[str] = []
-        for msg in messages:
-            for container, key in _iter_text_parts(msg):
-                spans.extend(pseudo.detect(container[key]))
-                if msg.get("role") != "system":
-                    joined.append(container[key])
-        verdict = scan("\n".join(joined))
-        return spans, verdict, decide(spans, verdict, policy)
+    def base_record(p: Prepared, request_id: str, tenant: str, session: str) -> dict[str, Any]:
+        # Never put raw text in the audit trail: counts and decisions only.
+        return {
+            "request_id": request_id,
+            "tenant": tenant,
+            "session_id": session,
+            "action": p.decision.action.value,
+            "upstream": p.decision.upstream,
+            "sensitivity": p.decision.sensitivity.value,
+            "entities": p.entity_counts,
+            "injection_rules": p.verdict.rules,
+            "scan_scope": p.scan_scope,
+            "spotlighted": p.spotlighted,
+            "tools_stripped": p.decision.strip_tools,
+            "detection_failed": p.detection_failed,
+        }
 
-    def transform(messages: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
-        out = copy.deepcopy(messages)
-        for msg in out:
-            for container, key in _iter_text_parts(msg):
-                container[key] = pseudo.pseudonymise(container[key], session_id).text
-        return [{"role": "system", "content": PLACEHOLDER_NOTICE}, *out]
+    def prepare_or_fail(body: dict[str, Any], tenant: str, session: str, request_id: str) -> Prepared:
+        try:
+            return gateway.prepare(body, tenant, session)
+        except DetectionFailure as exc:
+            audit.append(
+                {"request_id": request_id, "tenant": tenant, "status": "detector_error", "error": str(exc)}
+            )
+            raise HTTPException(503, "entity detection unavailable; request refused (fail-closed)") from exc
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
 
     @app.post("/v1/inspect")
-    async def inspect(body: dict[str, Any], x_session_id: str | None = Header(default=None)):
-        """Dry run: show what would leave the perimeter, without calling any model."""
-        session_id = x_session_id or f"inspect-{uuid.uuid4()}"
-        messages = body.get("messages", [])
-        spans, verdict, decision = analyse(messages)
-        outbound = transform(messages, session_id) if decision.action == Action.PSEUDONYMISE else messages
-        pseudo.vault.purge(session_id)
+    async def inspect(
+        body: dict[str, Any],
+        x_tenant_id: str | None = Header(default=None),
+    ):
+        """Dry run: show exactly what would leave the perimeter, without calling any model."""
+        tenant = _checked_id(x_tenant_id, "default", "tenant id")
+        session = f"inspect-{uuid.uuid4()}"
+        p = prepare_or_fail(body, tenant, session, session)
+        pseudo.vault.purge(p.vault_key)
         return {
             "decision": {
-                "action": decision.action.value,
-                "upstream": decision.upstream,
-                "sensitivity": decision.sensitivity.value,
-                "reasons": decision.reasons,
+                "action": p.decision.action.value,
+                "upstream": p.decision.upstream,
+                "sensitivity": p.decision.sensitivity.value,
+                "reasons": p.decision.reasons,
+                "tools_stripped": p.decision.strip_tools,
             },
-            "entities": [{"type": s.entity_type, "source": s.source} for s in spans],
-            "injection": {"flagged": verdict.flagged, "rules": verdict.rules},
-            "outbound_messages": outbound,
+            "entities": [{"type": s.entity_type, "source": s.source} for s in p.spans],
+            "injection": {"flagged": p.verdict.flagged, "rules": p.verdict.rules, "scope": p.scan_scope},
+            "spotlighted_segments": p.spotlighted,
+            "outbound": p.outbound,
         }
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(body: dict[str, Any], x_session_id: str | None = Header(default=None)):
+    async def chat_completions(
+        body: dict[str, Any],
+        x_session_id: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+    ):
+        # In production the tenant comes from the authenticated API key, not a header.
         if body.get("stream"):
             raise HTTPException(400, "streaming is not supported yet (see ROADMAP)")
-        session_id = x_session_id or str(uuid.uuid4())
+        tenant = _checked_id(x_tenant_id, "default", "tenant id")
+        session = _checked_id(x_session_id, str(uuid.uuid4()), "session id")
         request_id = str(uuid.uuid4())
         started = time.perf_counter()
 
-        messages = body.get("messages", [])
-        spans, verdict, decision = analyse(messages)
+        p = prepare_or_fail(body, tenant, session, request_id)
+        record = base_record(p, request_id, tenant, session)
 
-        record: dict[str, Any] = {
-            "request_id": request_id,
-            "session_id": session_id,
-            "action": decision.action.value,
-            "upstream": decision.upstream,
-            "sensitivity": decision.sensitivity.value,
-            "entities": _count(spans),
-            "injection_rules": verdict.rules,
-        }
-
-        if decision.action == Action.BLOCK or decision.upstream is None:
+        if p.decision.action == Action.BLOCK or p.decision.upstream is None:
             audit.append({**record, "status": "blocked"})
-            raise HTTPException(403, {"error": "blocked by policy", "reasons": decision.reasons})
+            raise HTTPException(403, {"error": "blocked by policy", "reasons": p.decision.reasons})
 
-        upstream = policy.upstreams[decision.upstream]
-        outbound = dict(body)
-        outbound["model"] = upstream.model
-        if decision.action == Action.PSEUDONYMISE:
-            outbound["messages"] = transform(messages, session_id)
-
+        upstream = policy.upstreams[p.decision.upstream]
+        outbound = {**p.outbound, "model": upstream.model}
         headers = {"Content-Type": "application/json"}
         if upstream.api_key:
             headers["Authorization"] = f"Bearer {upstream.api_key}"
@@ -155,12 +152,7 @@ def create_app(
             audit.append({**record, "status": "upstream_error", "http_status": resp.status_code})
             return JSONResponse(payload, status_code=resp.status_code)
 
-        if decision.action == Action.PSEUDONYMISE:
-            for choice in payload.get("choices", []):
-                msg = choice.get("message") or {}
-                if isinstance(msg.get("content"), str):
-                    msg["content"] = pseudo.reidentify(msg["content"], session_id)
-
+        payload = gateway.restore(payload, p)
         usage = payload.get("usage") or {}
         audit.append(
             {
@@ -175,17 +167,10 @@ def create_app(
         return JSONResponse(
             payload,
             headers={
-                "X-Sovgate-Action": decision.action.value,
-                "X-Sovgate-Upstream": decision.upstream,
+                "X-Sovgate-Action": p.decision.action.value,
+                "X-Sovgate-Upstream": p.decision.upstream,
                 "X-Sovgate-Request-Id": request_id,
             },
         )
 
     return app
-
-
-def _count(spans: list[Span]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for s in spans:
-        counts[s.entity_type] = counts.get(s.entity_type, 0) + 1
-    return counts
