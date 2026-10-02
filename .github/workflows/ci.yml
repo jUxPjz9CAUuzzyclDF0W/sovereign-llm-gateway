@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      benchmark:
+        description: "Run the NER benchmark (downloads models, ~10 min)"
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: ruff check . && ruff format --check .
+      - run: pytest -q
+
+  eval-gate:
+    # Fails the build if any structured entity leaks to the outbound prompt.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: PYTHONPATH=src python -m evals.leak_eval --threshold 0.0 --out evals/results/leak.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: evals/results/
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t sovereign-llm-gateway .
+
+  benchmark:
+    if: github.event_name == 'workflow_dispatch' && inputs.benchmark
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: make install-ner
+      - run: make benchmark
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: evals/results/

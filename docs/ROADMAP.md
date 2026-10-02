@@ -19,12 +19,13 @@ Each milestone ships with a measurable result, published in the README.
 - GLiNER (multilingual, zero-shot) and Presidio backends behind one interface; name-mention propagation across messages
 - Benchmark: 30 hand-written gold documents + 600 synthetic documents (EN/FR/DE), comparison with Presidio ([results](BENCHMARK.md))
 
-## v0.3 Utility benchmark: what does privacy cost?
+## v0.3 Utility benchmark (done)
 
-- Demo RAG: Qdrant + local embeddings (bge-m3) over a public corpus seeded with synthetic personal data
-- Compare answer quality: no protection, typed tokens, realistic surrogates (Faker), local-only model
-- Metrics: faithfulness and answer correctness (LLM-as-judge, RAGAS), latency overhead, cost per 1k requests
-- Add LLM Guard (Anonymize scanner) and LiteLLM's Presidio guardrail as end-to-end baselines
+- 108 RAG-style questions (EN/FR/DE) with distractor documents; answers checked after re-identification
+- Five conditions on the same model: no protection, gateway, `[REDACTED]`, Presidio defaults, LLM Guard defaults
+- Result: no measurable accuracy loss with the gateway at 0% outbound leak ([results](BENCHMARK.md#utility-benchmark))
+- Found and fixed: re-identification of bare token digests returned by small models
+- Next: rerun on a frontier model and on a 7B local model; add retrieval (Qdrant + bge-m3) and LiteLLM's guardrail end to end
 
 ## v0.4 Agents and MCP
 

@@ -92,3 +92,10 @@ def test_sessions_are_isolated(pseudo):
 def test_short_secret_rejected():
     with pytest.raises(ValueError):
         Pseudonymizer([RegexDetector()], b"short")
+
+
+def test_reidentify_bare_digest(pseudo):
+    out = pseudo.pseudonymise("Contact bob@example.ch", "s4").text
+    digest = out.split()[-1][len("<EMAIL_") : -1]
+    assert pseudo.reidentify(f"Answer: {digest}.", "s4") == "Answer: bob@example.ch."
+    assert pseudo.reidentify(f"x{digest}y", "s4") == f"x{digest}y"  # not inside other words

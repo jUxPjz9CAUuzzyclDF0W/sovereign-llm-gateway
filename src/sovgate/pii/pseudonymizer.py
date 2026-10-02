@@ -139,4 +139,11 @@ class Pseudonymizer:
                 re.IGNORECASE,
             )
             text = loose.sub(lambda _m, o=original: o, text)
+        # 3. bare digest: small models sometimes answer with the hex part only
+        #    ("7d8241"). Six random hex chars are specific enough to map back.
+        for token, original in mapping.items():
+            m = TOKEN_RE.fullmatch(token)
+            if m and len(m.group(2)) >= 6:
+                bare = re.compile(rf"(?<![0-9A-Za-z]){m.group(2)}(?![0-9A-Za-z])", re.IGNORECASE)
+                text = bare.sub(lambda _m, o=original: o, text)
         return text

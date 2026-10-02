@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sovereign-llm-gateway"
-version = "0.2.0"
+version = "0.3.0"
 description = "Privacy, security and audit gateway for LLM, RAG and agent traffic"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ner = ["gliner>=0.2", "presidio-analyzer>=2.2", "spacy>=3.7"]
+bench = ["presidio-anonymizer>=2.2", "llm-guard>=0.3", "matplotlib>=3.8"]
 dev = ["pytest>=8", "ruff>=0.5"]
 
 [tool.hatch.build.targets.wheel]
