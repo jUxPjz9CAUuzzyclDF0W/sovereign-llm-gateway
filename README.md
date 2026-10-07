@@ -1,3 +1,6 @@
+# DISCOUNTINUED
+## merged into privasoc+
+ 
 # Sovereign LLM Gateway
 
 **A drop-in, OpenAI-compatible gateway that lets organisations use external LLMs on sensitive data without the sensitive data leaving their perimeter.**
