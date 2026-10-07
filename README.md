@@ -1,5 +1,5 @@
 # DISCOUNTINUED
-## merged into privasoc+
+merged into privasoc+
  
 # Sovereign LLM Gateway
 
